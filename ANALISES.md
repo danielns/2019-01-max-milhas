@@ -1,6 +1,7 @@
 # Análise 1: Horários de Acesso
 
 1. Qual é a análise:
+
 Identificar quais faixas de horários, por dia da semana, há mais buscas ao site.
 
 2. Motivação da análise:
@@ -17,12 +18,15 @@ A partir da variável `data_busca` que possui informações do dia, mês, ano, h
 # Análise 2: Oferta das Companhias Aereas por Destino
 
 1. Qual é a análise:
+
 Identificar por destino, quantas companhias áreas usualmente oferecem voos e se em todas as buscas por esses destinos essas companhias estão aparecendo.
 
 2. Motivação da análise:
+
 Avaliar o motor de busca da plataforma. Por exemplo, suponha que para a maioria das buscas por voos para o trajeto Belo Horizonte - MG Navegantes -SC são apresentados ofertas das 4 companias aéreas. Entretanto, para uma certa porcentagem dessas buscas só são apresentadas ofertas de 2 companhias. Talvez a ausência dessas companhias nas ofertas possa sugerir algum problema no momento da busca.
 
 3. Como executar
+
 Identificar pelo banco de buscas quais são as companhias que aparecem com maior frequência para cada trajeto. Com base nesse valor esperado, identificar o quantitativo de buscas para esses trajetos que apresentam menos companhias ofertando voos. Essa análise foi realizada no storytelling presente em `analise2.html`.
 
 
@@ -30,11 +34,14 @@ Identificar pelo banco de buscas quais são as companhias que aparecem com maior
 # Análise 3: Avaliação do Tempo de Execução das Buscas
 
 1. Qual é a análise:
+
 Avaliar o tempo de execução das buscas, procurando identificar padrões paras as buscas mais rápidas e as buscas mais demoradas;
 
 2. Motivação da análise:
+
 Melhorar o motor de busca da plataforma, identificando os padrões de busca que demoram mais para ser executados. Uma vez identificados melhorias podem ser realizadas.
 
 3. Como executar
+
 A partir do campo `diff_segundos_entre_fim_da_busca_e_recebimento` conseguimos identificar o tempo de execução de cada busca. Podemos utilizar um limite de 2 minutos para diferenciar as buscas entre rápidas e demoradas. Uma vez categorizadas as buscas entre rápidas e demoradas, podemos minerar os dados em busca de padrões.
 
