@@ -1,0 +1,428 @@
+---
+title: "Analise 2 Oferta das Companhias Aereas por Trajeto"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## Descrição
+
+
+Essa análise tem como objetivo identificar por trajeto, quantas companhias áereas usualmente oferecem voos e se em todas as buscas por esses destinos essas companhias estão aparecendo. 
+
+Por exemplo, suponha que o usuário deseje uma passagem de Belo Horizonte MG para Navegantes SC. Esse percurso é realizado por pelo menos 3 companhias TAM, AZUL e GOL. A expectativa é que sempre que o usuário realize essa busca, lhe seja disponibilizado ofertas dessas três empresas. Caso no momento da busca falte ofertas de uma ou mais companhias, isso pode ser um indicativo de simplesmente uma indisponibilidade de voos para data de busca, ou **uma falha no motor de buscas da plataforma da MaxMilhas**. Ao identificar casos em que isto acontece podemos posteriormente avaliar qualitativamente qual é de fato a razão dessa falta de oferta.
+
+
+A principal conclusão apresentada por essa análise foi que em 206 buscas realizadas no periodo de 01/03/2017 até 21/03/2017 faltaram ofertas de voos da Companhia GOL. Outro ponto comum dessas buscas é que todas tem como data de ida o mês de março de 2018. Ou seja, para 206 buscas com data de ida 03/2018 esperava-se ofertas da GOL, mas não apareceu nenhum resultado.
+
+A presente análise está distribuida nas seguintes seções:
+
+**1. Carga e Tratamento do Banco de Dados** - Realizamos a carga do banco, limpeza e inclusão da informação de Estado;
+
+**2. Agregação do Banco de Dados e geração da variável de Trajeto** - gera banco agregado por busca e gera variável que identifica o trajeto;
+
+**3. Frequência de Companhias por Trajeto** - Nessa seção descobrimos quantas companhias são esperadas que ofertem voos por trajeto;
+
+**4. Oferta das Companhias Aéreas Por Data de Ida** - nessa seção descobrimos que a maioria das buscas com data de ida março de 2018 apresentam ausência de uma ou mais companhias aereas ofertando voos;
+
+**5. Padrões das Buscas por voos para data de ida no mês de Março de 2018** - Seção que conclui a análise. Apresenta o resultado que para data de ida 03/2018 a GOL foi a empresa mais ausente nas buscas realizadas de 01/03/2017 até 21/03/2017.
+
+Todas as funções utilizadas estão presentes em `src/helper.R`
+
+
+## Carga e Tratamento do Banco de Dados
+
+
+Para realizar essa análise utilizaremos o log de buscas `out.csv`. Para essa análise serão necessários os seguintes campos:
+
+- idsearch
+- companhia_aerea
+- data_ida
+- data_volta
+- voo_internacional
+- data_busca
+- qtd_voos
+- nome_aeroporto_ida
+- nome_aeroporto_volta
+
+A seleção das variáveis foi feita via `bash` pelo comando `cut -d";" -f3,4,8,9,16,19,25,31,35 out.csv > out_analise2.csv`
+
+Ao realizar a carga, para simplificação da análise, consideramos apenas voos nacionais e desconsideramos buscas em que não aparecem o nome do aeroporto na ida ou volta.
+
+```{r carga}
+
+# Carrega as bibliotecas necessárias
+
+suppressPackageStartupMessages(require(data.table))
+suppressPackageStartupMessages(require(readxl))
+suppressWarnings(suppressPackageStartupMessages(require(ggplot2)))
+suppressWarnings(suppressPackageStartupMessages(require(kableExtra)))
+suppressPackageStartupMessages(require(knitr))
+source("src/helper.R", encoding = "UTF-8")
+
+buscas = data.table(read.csv2("data-raw/out_analise2.csv", stringsAsFactors = F, header=FALSE))
+
+names(buscas) = c("idsearch", "companhia_aerea", "data_ida", "data_volta", "voo_internacional", 
+                  "data_busca", "qtd_voos", "nome_aeroporto_ida", "nome_aeroporto_volta")
+
+# Considera-se apenas voos nacionais e registros com informação sobre o aerporto de ida e volta
+
+buscas = buscas[nome_aeroporto_volta != ""]
+buscas = buscas[nome_aeroporto_ida != ""]
+buscas = buscas[voo_internacional != "SIM"]
+
+```
+
+
+Para caracterizar melhor os trajetos, inserimos a variável Unidade da Federação (UF). Assim, para cada município presente nas variáveis `nome_aerporto_ida` e `nome_aeroporto_volta`, inserimos o seu Estado correspondente. A tabela de correspondência município UF está presente no banco `data-raw/ClassificacaoIBGE.xlsx` que possui a relação de todos os municípios do Brasil.
+
+O nome de um município pode repetir em vários Estados. Assim, para aqueles municípios que possuem aeroporto, *excluimos do banco os municípios de outros Estados que possuem nome idêntico*. É o caso, por exemplo, do município de Belém na Paraiba.
+
+
+```{r mun_ibge}
+mun_ibge = data.table(read_excel("data-raw/ClassificacaoIBGE.xlsx"))
+mun_ibge[, NomMunicipioSimples := removeAcentos(NomMunicipioSimples)]
+
+# nomes_repetidos é um banco que possui os nomes dos municípios que aparecem mais de uma vez.
+# A análise desse banco permitiu a montagem do vetor municpios_excluir
+
+nomes_repetidos = mun_ibge[, list(.N), list(NomMunicipioSimples)][N > 1, ]
+
+municipios_excluir = c("belem PB", "belem AL", "boa vista PB", "bonito PA", "bonito PE", 
+                       "bonito BA", "campo grande AL", "cascavel CE", "cruzeiro do sul PR", 
+                       "cruzeiro do sul RS", "humaita RS", "palmas PR", "rio branco MT", 
+                       "santa maria RN", "santarem PB", "tabatinga SP", "valenca RJ")
+                       
+mun_ibge = mun_ibge[!paste(tolower(NomMunicipioSimples), NomUF) %in% municipios_excluir]
+
+mun_ibge = mun_ibge[, list(NomMunicipioSimples, NomUF)]
+
+```
+
+Em seguida, inserimos a Unidade da Federação em nosso banco de `buscas`. Para isso é necessário tratar as variáveis `nome_aerporto_ida` e `nome_aeroporto_volta` realizando:
+
+1. Remoção de acentos e tornar as palavras minusculas com a função `removeAcentos()`;
+2. Remover o nome do aeroporto do nome da cidade *Ex.: Belo Horizonte - Confins Intl*;
+3. Corrigir casos especiais do tipo *"lencois chapada diamantina" = "lencois"*.
+
+
+
+```{r merge_buscas_munibge}
+
+buscas[, nome_aeroporto_ida := removeAcentos(gsub("(.+) * -.+", "\\1", nome_aeroporto_ida))]
+buscas[, nome_aeroporto_volta := removeAcentos(gsub("(.+) * -.+", "\\1", nome_aeroporto_volta))]
+
+buscas$nome_aeroporto_ida = corrige_nome_mun(buscas$nome_aeroporto_ida)
+buscas$nome_aeroporto_volta = corrige_nome_mun(buscas$nome_aeroporto_volta)
+
+# Insere UF para nome_aerporto_ida
+buscas = merge(buscas, mun_ibge, by.x="nome_aeroporto_ida", by.y="NomMunicipioSimples", all.x=T)
+setnames(buscas, c("NomUF"), c("UF_ida"))
+buscas[, nome_aeroporto_ida := paste(nome_aeroporto_ida, UF_ida)]
+
+# Insere UF para nome_aerporto_ida
+buscas = merge(buscas, mun_ibge, by.x="nome_aeroporto_volta", by.y="NomMunicipioSimples", all.x=T)
+setnames(buscas, c("NomUF"), c("UF_volta"))
+buscas[, nome_aeroporto_volta := paste(nome_aeroporto_volta, UF_volta)]
+
+# Remove banco de mun_ibge
+rm(mun_ibge)
+
+
+```
+
+
+## Agregação do Banco de Dados e geração da variável de Trajeto
+
+Uma vez tratado o banco de dados, verificamos que para cada busca, há multiplas linhas identificando resultados de cada companhia aerea. O interessante para nossa análise é agregar esse banco por busca (`idsearch`), obtendo as seguintes informações:
+
+1. `qtd_companhias`: Número de companhias aereas apareceram para cada busca;
+2. `lst_companhias`: Lista das companhias aereas que apareceram para cada busca;
+3. `qtd_voos`: Total de voos para cada busca.
+
+Logo em seguida geramos a variável `percurso_cidade`. Essa variável gera o trajeto de cada busca, no formato *Belo Horizonte MG - Navegantes SC* por exemplo. Na perspectiva de avaliar o quantitativo de companhias disponiveis por trajeto, consideramos que se há 3 companhias disponíveis no trajeto *Belo Horizonte MG - Navegantes SC* então as mesmas estarão disponiveis para a volta *Navegantes SC - Belo Horizonte MG*. Assim, a função `gera_percurso()` irá gerar o percurso **Belo Horizonte MG - Navegantes SC** que é representativo para as buscas *DE Belo Horizonte MG - PARA Navegantes SC*  e *DE Navegantes SC - PARA Belo Horizonte MG*.
+
+
+
+```{r gera_percurso}
+
+# Agregação do banco de dados por busca
+
+buscas = buscas[, list(qtd_companhias = length(unique(companhia_aerea)), 
+                       lst_companhias = paste(sort(unique(companhia_aerea)), collapse=" "),
+                       qtd_voos = sum(qtd_voos, na.rm=T)),
+                  list(idsearch, data_busca, nome_aeroporto_ida, 
+                       nome_aeroporto_volta, data_ida, data_volta)]
+
+# Gera variável percurso_cidade
+
+buscas[, percurso_cidade := apply(buscas[, list(nome_aeroporto_ida, nome_aeroporto_volta)], 1, gera_percurso)]
+
+
+```
+
+
+## Frequência de Companhias por Trajeto
+
+Uma vez gerada a variável que identifica os trajetos (`percurso_cidade`), conseguimos identificar por trajeto qual é a maior frequência de companhias áereas que ofertam voos. Essa informação é obtido pelo banco `analise_trajeto` construido abaixo:
+
+
+
+```{r analise_trajeto}
+
+# Agrega o banco de buscas por percurso_cidade e qtd_companhias
+
+analise_trajeto = buscas[, list(freq = .N, qtd_voos = sum(qtd_voos)),
+                        list(percurso_cidade, qtd_companhias)]
+
+# Gera a porcentagem de buscas por trajeto e por quantidade de companhias
+
+analise_trajeto = merge(analise_trajeto,
+                       analise_trajeto[, list(total = sum(freq)), list(percurso_cidade)],
+                       by="percurso_cidade")
+
+analise_trajeto[, porcent := round(freq / total, 2)]
+analise_trajeto[, total:=NULL]
+
+# Identificamos qual é a quantidade de companhias que mais aparecem nas buscas por trajeto
+
+moda_percursos = buscas[, list(moda = gera_moda(qtd_companhias)), list(percurso_cidade)]
+analise_trajeto = merge(analise_trajeto, moda_percursos, by="percurso_cidade")
+
+kable(analise_trajeto[1:11], caption = "Banco analise_trajeto", align = "c") %>%
+  kable_styling(bootstrap_options = "striped", full_width = F) %>%
+  row_spec(3:4, bold = T, color = "white", background = "#006600")
+
+
+```
+
+
+Acima apresentamos as 11 primeiras linhas da tabela `analise_trajeto`. Nesse resultado podemos ver que, por exemplo, para o trajeto Alta Floresta MT - Aracaju SE, 23 buscas apresentaram 2 companhias aereas (96% do total) e apenas 1 busca apresentou uma companhia (4%). Logo, para esse percurso a moda é 2 companhias, ou seja, **esperamos que quando o usuário realizar pesquisas referentes a esse percurso lhe seja disponibilizado ofertas de 2 companhias**.
+
+Em seguida definimos a variável `nivel` que assume o três valores distintos:
+- **esperado** - quando a quantidade de companhias por trajeto for igual ao valor com maior frequência (moda);
+- **abaixo** - quando a quantidade de companhias por trajeto for menor que a moda;
+- **acima** - quando a quantidade de companhias por trajeto for maior que a moda.
+
+Ao criar a variável nível inserimos essa informação no banco de buscas.
+
+```{r nivel_em_buscas}
+
+# Criação da variável nivel
+
+analise_trajeto[, nivel := "esperado"]
+analise_trajeto[qtd_companhias < moda, nivel := "abaixo"]
+analise_trajeto[qtd_companhias > moda, nivel := "acima"]
+analise_trajeto[, moda := NULL]
+
+# Inserção da variável nivel no banco de buscas
+
+buscas = merge(buscas, 
+               analise_trajeto[, list(percurso_cidade, qtd_companhias, nivel)],
+               by = c("percurso_cidade", "qtd_companhias"), all.x = T)
+
+
+# Formatar data_ida e data_volta para não aparecer hora minutos e segundos
+buscas[, data_ida := as.Date(data_ida)]
+buscas[, data_volta := gsub("(\\d{4}\\-\\d{2}\\-\\d+).+", "\\1", data_volta)]
+
+```
+
+
+```{r case aracaju - juazeiro}
+
+kable(buscas[percurso_cidade=="aracaju SE - juazeiro do norte CE", 
+                    list(idsearch, data_busca, data_ida, data_volta, qtd_companhias, 
+                         lst_companhias, nivel)][order(data_busca)][1:10], 
+             caption = "Exemplo Buscas Aracaju SE para Juazeiro do Norte CE")  %>%
+  kable_styling(bootstrap_options = "striped", full_width = F) %>%
+  row_spec(1:2, bold = T, color = "white", background = "#006600") %>%
+  row_spec(8:9, bold = T, color = "white", background = "#CC8400")
+
+```
+
+
+Analisando as linhas em verde, o primeiro registro corresponde a uma busca de voos para o trajeto Aracaju SE - Juazeiro do Norte CE realizado às 19h59 do dia 01/01/2017 e teve como resultado ofertas das 4 companhias. Três minutos depois (linha 2 verde), no mesmo dia, a mesma busca foi realizada com a mesma data de ida anterior, e só foram disponibilizados ofertas de 2 empresas (GOL e TAM). Nesse caso em especial pode ter ocorrido uma falha no momento da busca.
+
+Entretanto para as buscas destacadas com a cor laranja, embora elas tenham sido feitas no mesmo dia, possuem datas de ida distintas. Logo, a baixa quantidade de companhias ofertando voos (respectivamente 2 e 1), podem representar uma indisponibilidade das empresas em terem assentos disponíveis nessas datas, bem como pode ser um problema no momento da busca.
+
+
+## Oferta das Companhias Aéreas Por Data de Ida
+
+
+Nesse momento o banco de buscas possui a variável `nivel`, que indica para cada busca, se o quantitativo de companhias que ofertam voos para determinado trajeto está igual ao valor esperado, abaixo ou acima deste. **Uma hipótese plausivel sobre a variável nivel é que esta é impactada pela data de ida que consta na busca**. Espera-se que em meses onde há uma grande demanda por voos existam mais buscas com uma oferta abaixo do esperado.
+
+Nessa perspectiva, criaremos um gráfico que mostra o percentual de buscas por nível, para cada mês da data de ida. Entretanto, em um primeiro momento faz-se necessário limpar a variável `data_ida`, uma vez que há registros nessa variável anteriores a janeiro de 2017, bem como a valores muito acima de 31/12/2018
+
+```{r limpeza_data_ida}
+
+cat("Valores de data_ida anteriores a 01/01/2017: ", 
+    paste(buscas[data_ida < "2017-01-01", unique(data_ida), ], collapse= ", "), "\n")
+
+cat("Valores de data_ida após a 31/12/2018: ",
+    paste(buscas[data_ida > "2018-12-31", unique(data_ida)], collapse= ", "))
+
+
+buscas = buscas[data_ida >= "2017-01-01" & data_ida <= "2018-12-31"]
+
+```
+
+Uma vez realizada essa limpeza da variável `data_ida` geramos o banco `nivel_mes` que representa o quantitativo de buscas para cada nível por mes da data de ida.
+
+```{r nivel_mes}
+
+buscas[, mes_ida := gsub("(\\d{4}\\-\\d{2}).+", "\\1", as.character(data_ida))]
+
+# Obtemos o quantitativo de buscas por mes_ida e nivel
+
+nivel_mes = buscas[, list(freq = .N), list(mes_ida, nivel)]
+
+# Geramos o valor percentual de cada nivel por mes de ida
+nivel_mes = merge(nivel_mes,
+                  nivel_mes[, list(total = sum(freq)), list(mes_ida)],
+                  by="mes_ida")
+
+nivel_mes[, porcentagem := round(freq*100 / total, 1)]
+nivel_mes[, total:=NULL]
+
+nivel_mes[nivel == "acima", nivel := paste0("0. ", nivel)]
+nivel_mes[nivel == "esperado", nivel := paste0("1. ", nivel)]
+nivel_mes[nivel == "abaixo", nivel := paste0("2. ", nivel)]
+
+
+nivel_mes = nivel_mes[order(-nivel)][porcentagem>1, list(nivel, freq, porcentagem,
+                              posicao = cumsum(porcentagem) - (0.5 * porcentagem)), by = mes_ida]
+
+```
+
+O gráfico abaixo mostra que para cada mes da data de ida informada nas buscas, em média cerca de 19% dessas buscas apresentaram uma quantidade abaixo do esperado em termos de ofertas de companhias. Esse valor de média não considera os meses de março de 2018 e dezembro de 2018 que apresentaram um resultado atipico. Para esses meses, **a maioria das buscas apresentaram um valor abaixo do esperado para a quantidade de companhias**. Valores acima do esperado são menores que 1% em todos os meses.
+
+```{r graph_mes_ida}
+
+gera_grafico1()
+
+```
+
+Na próxima seção vamos analisar as buscas que foram preenchidas com o mes de ida para março de 2018.
+
+
+## Padrões das Buscas por voos para data de ida no mês de Março de 2018
+
+Essa seção apresenta alguns padrões das buscas com data de ida para março de 2018. Conforme a seção acima, cerca de 89% dessas buscas apresentaram um quantitativo de companhias aereas abaixo do esperado.
+
+A primeira pergunta que nos vem a mente é **quais são os destinos que apresentaram um nível baixo e aparecem com maior frequência nesse caso?**
+
+
+```{r freq_nvl_baixo_marco}
+
+# Realizamos um recorte em buscas
+
+analise_2018_03 = buscas[mes_ida == "2018-03" & nivel=="abaixo"]
+
+
+# Qual é o percurso com mais nivel abaixo?
+
+frequencia = analise_2018_03[, list(freq = .N), list(percurso_cidade)]
+
+
+kable(frequencia[order(-freq)][1:10], 
+             caption = "Frequência de Trajetos com Nivel Baixo - Mês de Ida 03/2018") %>%
+  kable_styling(bootstrap_options = "striped", full_width = F)
+
+```
+
+
+De 207 buscas com nivel baixo para março de 2018, a maior frequência é 9 e representam o trajeto **Fortaleza CE - Rio de Janeiro RJ**  e **Fortaleza CE - São Paulo SP**. De fato, em termos de destinos, os valores são bem distribuidos nesse banco.
+
+Um ponto importante que ganha destaque nessa análise é a perspectiva qualitativa de saber quais companhias não ofertaram voos para cada uma das 207 buscas. Assim, comparamos a lista de companhias que ofertaram voos para cada busca e a lista de companhias esperada para cada trajeto. Dessa forma, conseguimos analisar se há algum padrão em termos de quais companhias estão deixando de ofertar voos.
+
+
+```{r gera_vetor_diferencas}
+
+# Banco que apresenta a lista de companhias para cada percurso.
+cia_esperadas = buscas[, list(freq = .N, 
+                              qtd_voos = sum(qtd_voos), 
+                              lst_companhias = paste(unique(lst_companhias), collapse=" ")), 
+                       list(percurso_cidade, qtd_companhias)]
+
+cia_esperadas = merge(cia_esperadas, moda_percursos, by="percurso_cidade")
+
+# Ao realizar esse recorte, mantemos em cia_esperadas apenas a lista de companhias esperada por percurso
+cia_esperadas = cia_esperadas[qtd_companhias == moda]
+
+# Inserimos a lista de companhias esperadas por trajeto nas buscas de 03/2018
+analise_2018_03 = merge(analise_2018_03,
+                        cia_esperadas[, list(percurso_cidade, cia_esperadas = lst_companhias)], 
+                        by="percurso_cidade", all.x=T)
+
+# Geramos a variável lista de companhias aereas faltantes
+
+analise_2018_03 = gera_lista_ca_faltantes(analise_2018_03)
+
+
+kable(analise_2018_03[, list(percurso_cidade, data_busca, 
+                                    lst_companhias, cia_esperadas, 
+                                    lst_ca_faltantes)][order(data_busca)][1:10], 
+             caption = "Exemplo Banco analise_2018_03") %>%
+  kable_styling(bootstrap_options = "striped", full_width = F)
+
+
+```
+
+Acima apresentamos um exemplo do banco `analise_2018_03`. A primeira linha, por exemplo, mostra uma busca para o trajeto Belo Horizonte - Salvador realizada dia 01/03/2017. Nesse busca apareceram ofertas apenas para AZUL e TAM, sendo que a expectativa para esse trajeto era aparecer voos da AZUL, GOL e TAM. Assim, faltou (`lst_ca_faltantes` ) ofertas da GOL. As demais linhas possuem uma interpretação semelhante.
+
+Identificadas as companhias faltantes por busca, podemos analisar graficamente, a frequência com que cada companhia aparece por dia de busca.
+
+
+```{r gera_banco_ca_faltantes}
+
+# Gera variaveis com o nome de cada companhia e se estas aparecem em lst_ca_faltantes
+analise_2018_03 = gen_freq_cia(analise_2018_03, "TAM")
+analise_2018_03 = gen_freq_cia(analise_2018_03, "AZUL")
+analise_2018_03 = gen_freq_cia(analise_2018_03, "GOL")
+analise_2018_03 = gen_freq_cia(analise_2018_03, "AVIANCA")
+
+
+# Data busca por dia
+
+analise_2018_03[, data_busca := gsub("(\\d{4}\\-\\d{2}\\-\\d{2}).+", "\\1", data_busca)]
+
+analise_2018_03_dia = analise_2018_03[, list(TAM = sum(TAM), AZUL = sum(AZUL),
+                                             GOL = sum(GOL), AVIANCA = sum(AVIANCA)), list(data_busca)]
+
+analise_2018_03_dia = melt(analise_2018_03_dia, id.vars = c("data_busca"),
+                           variable.name = "companhia", 
+                           value.name = "freq", variable.factor = F)
+
+analise_2018_03_dia = analise_2018_03_dia[freq > 0]
+
+#recorte1 = melt(recorte, id.vars = c("idsearch", "data_busca", "TAM", "AZUL", "GOL", "AVIANCA"))
+```
+
+
+
+
+```{r gera_grafico_ca_faltantes}
+
+gera_grafico2()
+
+```
+
+
+No gráfico acima observamos que em todos os dias de busca, a GOL foi a companhia que mais faltou nas buscas. Destaque para o dia 13/03/2017 onde essa empresa não esteve presente em 38 buscas. 
+
+
+```{r gera_freq_ca_faltantes}
+
+kable(analise_2018_03_dia[, list(freq = sum(freq)), list(companhia)][order(-freq)]) %>%
+  kable_styling(bootstrap_options = "striped", full_width = F)
+
+
+```
+
+Ao analisar o total de buscas considerando data de ida 03/2018, observamos que das 207 buscas com nivel baixo, 206 faltaram ofertas da GOL. Talvez isso possa sugerir que considerando as buscas realizadas do dia 01/03/2017 até 21/03/2017 houve algum tipo de falha em exibir resultados para a GOL nas buscas realizadas com data de ida para o mês de março de 2018. Ao mesmo tempo, essa falta de ofertas pode ser creditado a uma indisponibilidade da oferta pela empresa, o que não estaria relacionado com o motor de busca da Max Milhas. Faz-se necessário nesse caso novas análises para determinar a causa.
+
+
+
