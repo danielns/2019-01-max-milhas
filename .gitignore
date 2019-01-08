@@ -1,0 +1,5 @@
+# R files
+.Rproj.user
+.Rhistory
+.RData
+data-raw/out_analise2.csv
